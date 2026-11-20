@@ -1,0 +1,12 @@
+{
+  "name": "tend-sample",
+  "private": true,
+  "description": "A made-up app with known problems. The self-test runs Tend on it against the real public services.",
+  "dependencies": {
+    "lodash": "4.17.20",
+    "left-pad": "1.3.0"
+  },
+  "engines": {
+    "node": "18"
+  }
+}

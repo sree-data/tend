@@ -1,0 +1,29 @@
+{
+  "name": "tend-check",
+  "version": "0.1.0",
+  "description": "Tells you what your AI-built app needs this week: security holes to patch, AI models about to be switched off, and versions that no longer get fixes.",
+  "type": "module",
+  "bin": {
+    "tend-check": "bin/tend-check.mjs"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "homepage": "https://tend.sreeships.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sree-data/tend.git"
+  },
+  "author": "Sree",
+  "license": "UNLICENSED",
+  "keywords": [
+    "maintenance",
+    "dependencies",
+    "security",
+    "ai-models",
+    "coding-agent"
+  ]
+}

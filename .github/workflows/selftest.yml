@@ -1,0 +1,70 @@
+name: self-test
+
+# Runs the command on the sample app against the real public services,
+# on every change and every Monday, so a change in one of those services is noticed.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '17 14 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: The sample app, in sentences
+        run: |
+          set +e
+          node bin/tend-check.mjs sample > out.txt
+          code=$?
+          cat out.txt
+          set -e
+          test "$code" = "1"
+          grep -q "^Tend checked tend-sample" out.txt
+          grep -q "This week" out.txt
+          grep -q "lodash has" out.txt
+          grep -q "gpt-image-1-mini" out.txt
+          grep -q "Node 18" out.txt
+          ! grep -q "could not be reached" out.txt
+          ! grep -q "built-in copy" out.txt
+
+      - name: The sample app, as JSON
+        run: |
+          set +e
+          node bin/tend-check.mjs sample --json > out.json
+          code=$?
+          set -e
+          test "$code" = "1"
+          node -e "
+            const r = JSON.parse(require('fs').readFileSync('out.json', 'utf8'));
+            const ids = r.findings.map((f) => f.id);
+            console.log(ids, r.summary, r.missed);
+            if (!ids.includes('security:lodash')) throw new Error('lodash not flagged');
+            if (!ids.includes('runtime:node')) throw new Error('Node 18 not flagged');
+            if (r.missed.length) throw new Error('a lookup was missed: ' + r.missed);
+            if (r.modelTableIsBuiltIn) throw new Error('the published model table was not fetched');
+          "
+
+      - name: The way people run it, through npx
+        run: |
+          set +e
+          cd sample
+          npx -y "github:${{ github.repository }}#${{ github.sha }}" > ../npx.txt
+          code=$?
+          cat ../npx.txt
+          set -e
+          test "$code" = "1"
+          grep -q "^Tend checked tend-sample" ../npx.txt
