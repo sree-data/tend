@@ -29,20 +29,29 @@ It needs Node 18 or newer and nothing else. There is nothing to install or sign 
 
 ## What you get
 
-```
-Tend checked shop
+This is a real run on the sample app in this repository, shortened:
 
-One thing needs you this week. Two more can wait.
+```
+Tend checked tend-sample
+
+Two things need you this week. One more can wait.
 
 This week
   1. lodash has 4 known security holes
-     The most serious: Command Injection in lodash. You have 4.17.20. All 4 are fixed in 4.17.21.
-     To fix: Update the package lodash from 4.17.20 to 4.17.21 or newer. ...
+     The most serious: Command Injection in lodash. You have 4.17.20. All 4 are fixed in 4.18.0.
+     To fix: Update the package lodash from 4.17.20 to 4.18.0 or newer. ...
+  2. gpt-image-1-mini is switched off in 11 days
+     OpenAI will stop answering requests to this model on 1 December 2026. After that, any part
+     of your app that calls it fails. The replacement they recommend is gpt-image-2.6-sunburst
+     or gpt-image-2.6-flare.
 
 This month
-  2. Node 18 stopped getting security fixes on 30 April 2025
-     ...
+  3. Node 18 stopped getting security fixes on 30 April 2025
+     This is the engine your app runs on. New security holes found in it are no longer repaired.
+     The current long-term version is Node 26.
 ```
+
+Every item comes with a full "To fix" instruction for your coding agent.
 
 ## What it reads and what it sends
 

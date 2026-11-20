@@ -62,7 +62,7 @@ jobs:
         run: |
           set +e
           cd sample
-          npx -y "github:${{ github.repository }}#${{ github.sha }}" > ../npx.txt
+          npx -y "github:${{ github.repository }}" > ../npx.txt
           code=$?
           cat ../npx.txt
           set -e
