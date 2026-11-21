@@ -1037,8 +1037,11 @@ function modelFinding(model) {
 	if (retired) title = `${model.id} was switched off on ${when}`;
 	else if (model.daysLeft <= 30) title = `${model.id} is switched off in ${model.daysLeft} ${model.daysLeft === 1 ? "day" : "days"}`;
 	else title = `${model.id} is switched off on ${when}`;
-	const body = retired ? `${model.provider} no longer answers requests to this model, so any part of your app that calls it is failing. The replacement they recommend is ${model.replacement}.` : `${model.provider} will stop answering requests to this model on ${when}. After that, any part of your app that calls it fails. The replacement they recommend is ${model.replacement}.`;
-	const prompt = `My app calls the AI model ${model.id}, which ${retired ? "was" : "will be"} switched off on ${when}. Find every place the app names this model, including settings and environment files. Replace it with ${model.replacement}. Then send one real request to confirm it works, and tell me if the answers look different from before. Tell me exactly what you changed.`;
+	const named = model.replacement.trim();
+	const advice = named ? `The replacement they recommend is ${named}.` : `${model.provider} has not named a replacement.`;
+	const body = retired ? `${model.provider} no longer answers requests to this model, so any part of your app that calls it is failing. ${advice}` : `${model.provider} will stop answering requests to this model on ${when}. After that, any part of your app that calls it fails. ${advice}`;
+	const opening = `My app calls the AI model ${model.id}, which ${retired ? "was" : "will be"} switched off on ${when}. `;
+	const prompt = named ? opening + `Find every place the app names this model, including settings and environment files. Replace it with ${named}. Then send one real request to confirm it works, and tell me if the answers look different from before. Tell me exactly what you changed.` : opening + `Find every place the app names this model, including settings and environment files, and list them. Show me which current ${model.provider} models could take its place and what would change with each. Change nothing until I pick one.`;
 	return {
 		id: `model:${model.id}`,
 		kind: "model",
