@@ -821,10 +821,14 @@ function buildBatchQuery(packages, ecosystem) {
 		version
 	})) };
 }
+var sameName = (a, b) => {
+	const plain = (name) => String(name ?? "").toLowerCase().replace(/[-_.]+/g, "-");
+	return plain(a) === plain(b);
+};
 function interpretAdvisory(advisory, packageName, installedVersion) {
 	const fixes = [];
 	for (const affected of advisory.affected ?? []) {
-		if (affected.package?.name?.toLowerCase() !== packageName.toLowerCase()) continue;
+		if (!sameName(affected.package?.name, packageName)) continue;
 		for (const range of affected.ranges ?? []) for (const event of range.events ?? []) if (event.fixed && compareVersions(event.fixed, installedVersion) > 0) fixes.push(event.fixed);
 	}
 	fixes.sort(compareVersions);
@@ -867,6 +871,7 @@ async function findVulnerabilities(packages, ecosystem, fetchJson) {
 // src/lib/registry.ts
 async function latestVersions(packages, ecosystem, fetchJson) {
 	const latest = /* @__PURE__ */ new Map();
+	let failed = 0;
 	await Promise.all(packages.map(async ({ name }) => {
 		try {
 			if (ecosystem === "PyPI") {
@@ -876,8 +881,11 @@ async function latestVersions(packages, ecosystem, fetchJson) {
 				const data = await fetchJson(`https://registry.npmjs.org/${name.replace("/", "%2F")}/latest`);
 				if (data?.version) latest.set(name, data.version);
 			}
-		} catch {}
+		} catch {
+			failed += 1;
+		}
 	}));
+	if (packages.length > 0 && failed === packages.length) throw new Error("The registry could not be reached.");
 	return latest;
 }
 // src/lib/dates.ts
@@ -904,11 +912,13 @@ function daysBetween(fromIso, toIso) {
 	return Math.round((utc(toIso) - utc(fromIso)) / DAY);
 }
 function formatDate(iso) {
-	const [year, month, day] = String(iso).slice(0, 10).split("-").map(Number);
+	const [year, month, day] = String(iso ?? "").slice(0, 10).split("-").map(Number);
+	if (!year || !MONTHS[month - 1] || !day) return String(iso ?? "");
 	return `${day} ${MONTHS[month - 1]} ${year}`;
 }
 function todayIso(now = /* @__PURE__ */ new Date()) {
-	return now.toISOString().slice(0, 10);
+	const pad = (n) => String(n).padStart(2, "0");
+	return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 // src/lib/runtime.ts
 var SOON_DAYS = 90;
@@ -916,7 +926,7 @@ function runtimeStatus(name, version, cycles, today) {
 	const cycle = cycles.find((entry) => String(entry.cycle) === String(version));
 	if (!cycle) return null;
 	const eol = typeof cycle.eol === "string" ? cycle.eol : null;
-	let status = "ok";
+	let status = cycle.eol === true ? "ended" : "ok";
 	if (eol) {
 		const daysLeft = daysBetween(today, eol);
 		if (daysLeft <= 0) status = "ended";
@@ -927,11 +937,14 @@ function runtimeStatus(name, version, cycles, today) {
 		version: String(version),
 		status,
 		eol,
-		moveTo: newestStable(cycles)
+		moveTo: newestStable(cycles, today)
 	};
 }
-function newestStable(cycles) {
-	const sorted = [...cycles.some((entry) => "lts" in entry) ? cycles.filter((entry) => entry.lts) : cycles].sort((a, b) => compareVersions(String(b.cycle), String(a.cycle)));
+function newestStable(cycles, today) {
+	const supported = (entry) => entry.eol !== true && !(typeof entry.eol === "string" && daysBetween(today, entry.eol) <= 0);
+	const longTermNow = (entry) => entry.lts === true || typeof entry.lts === "string" && daysBetween(entry.lts, today) >= 0;
+	const hasLongTermFlag = cycles.some((entry) => "lts" in entry);
+	const sorted = [...cycles.filter((entry) => supported(entry) && (!hasLongTermFlag || longTermNow(entry)))].sort((a, b) => compareVersions(String(b.cycle), String(a.cycle)));
 	return sorted.length ? String(sorted[0].cycle) : null;
 }
 // src/lib/models.ts
@@ -939,11 +952,15 @@ function findModelRetirements(modelIds, table, today) {
 	const byId = new Map(table.models.map((model) => [model.id.toLowerCase(), model]));
 	const matches = [];
 	const unlisted = [];
+	const seen = /* @__PURE__ */ new Set();
 	for (const raw of modelIds) {
 		const id = String(raw ?? "").trim();
 		if (!id) continue;
-		const entry = byId.get(id.toLowerCase());
-		if (!entry) {
+		const bare = id.slice(id.lastIndexOf("/") + 1).toLowerCase();
+		if (seen.has(bare)) continue;
+		seen.add(bare);
+		const entry = byId.get(id.toLowerCase()) ?? byId.get(bare);
+		if (!entry || !/^\d{4}-\d{2}-\d{2}$/.test(String(entry.retires))) {
 			unlisted.push(id);
 			continue;
 		}
@@ -986,8 +1003,9 @@ var FAR_BEHIND = 2;
 var CHECK_AND_REPORT = "Then run the tests if there are any, start the app and check that the main screens still work. Tell me exactly what you changed. If this needs changes to my own code, list them and wait for my OK before making them.";
 function buildFindings({ vulnerabilities = [], packages = [], latest = /* @__PURE__ */ new Map(), runtimes = [], models = [] }) {
 	const flagged = new Set(vulnerabilities.map((pkg) => pkg.name));
+	const twice = new Set(vulnerabilities.map((pkg) => pkg.name).filter((name, at, all) => all.indexOf(name) !== at));
 	return [
-		...vulnerabilities.map(securityFinding),
+		...vulnerabilities.map((pkg) => securityFinding(pkg, twice.has(pkg.name))),
 		...models.map(modelFinding),
 		...runtimes.map(runtimeFinding).filter((finding) => finding !== null),
 		...behindFinding(packages, latest, flagged)
@@ -1002,25 +1020,27 @@ function summarize(findings) {
 	for (const finding of findings) counts[finding.urgency] += 1;
 	return counts;
 }
-function securityFinding(pkg) {
+function securityFinding(pkg, nameVersion = false) {
 	const worst = pkg.advisories.reduce((a, b) => SEVERITY_RANK[b.severity] > SEVERITY_RANK[a.severity] ? b : a);
 	const fixes = pkg.advisories.map((advisory) => advisory.fixedIn).filter((fix) => Boolean(fix)).sort(compareVersions);
 	const fixedIn = fixes.length === pkg.advisories.length ? fixes[fixes.length - 1] : null;
+	const partFix = !fixedIn && fixes.length ? fixes[fixes.length - 1] : null;
 	let urgency = worst.severity === "critical" || worst.severity === "high" ? "now" : worst.severity === "low" ? "later" : "soon";
 	if (pkg.dev && urgency === "now") urgency = "soon";
 	const ids = pkg.advisories.map((advisory) => advisory.cve ?? advisory.id).join(", ");
 	const count = pkg.advisories.length;
 	const several = count > 1;
-	const parts = [`${several ? "The most serious: " : ""}${trimPeriod(worst.summary)}.`, fixedIn ? `You have ${pkg.version}. ${several ? `All ${count} are` : "It is"} fixed in ${fixedIn}.` : `You have ${pkg.version}. No fixed version has been published yet.`];
+	const parts = [`${several ? "The most serious: " : ""}${trimPeriod(worst.summary)}.`, fixedIn ? `You have ${pkg.version}. ${several ? `All ${count} are` : "It is"} fixed in ${fixedIn}.` : partFix ? `You have ${pkg.version}. Updating to ${partFix} fixes ${fixes.length} of the ${count}; the rest have no fix yet.` : `You have ${pkg.version}. No fixed version has been published yet.`];
 	if (!pkg.direct) parts.push("Your app did not ask for this package itself. It comes along with something else you use.");
 	if (pkg.dev) parts.push("It is only used while building the app, not by your visitors.");
 	const problems = several ? `${count} known security problems` : "a known security problem";
-	const prompt = fixedIn ? `Update the package ${pkg.name} from ${pkg.version} to ${fixedIn} or newer. It has ${problems} (${ids}). First tell me where the app uses ${pkg.name}. ${CHECK_AND_REPORT}` : `The package ${pkg.name} (version ${pkg.version}) has ${problems} (${ids}) and there is no fixed version yet. Tell me where the app uses ${pkg.name}, whether the risky part is actually used, and what my options are. Do not change anything yet.`;
+	const prompt = fixedIn ? `Update the package ${pkg.name} from ${pkg.version} to ${fixedIn} or newer. It has ${problems} (${ids}). First tell me where the app uses ${pkg.name}. ${CHECK_AND_REPORT}` : partFix ? `Update the package ${pkg.name} from ${pkg.version} to ${partFix} or newer. It has ${problems} (${ids}); that version fixes ${fixes.length} of them and the rest have no fix yet. First tell me where the app uses ${pkg.name} and whether the unfixed parts are used. ${CHECK_AND_REPORT}` : `The package ${pkg.name} (version ${pkg.version}) has ${problems} (${ids}) and there is no fixed version yet. Tell me where the app uses ${pkg.name}, whether the risky part is actually used, and what my options are. Do not change anything yet.`;
+	const who = nameVersion ? `${pkg.name} ${pkg.version}` : pkg.name;
 	return {
-		id: `security:${pkg.name}`,
+		id: `security:${pkg.name}@${pkg.version}`,
 		kind: "security",
 		urgency,
-		title: several ? `${pkg.name} has ${count} known security holes` : `${pkg.name} has a known security hole`,
+		title: several ? `${who} has ${count} known security holes` : `${who} has a known security hole`,
 		body: parts.join(" "),
 		prompt,
 		links: pkg.advisories.map((advisory) => ({
@@ -1053,18 +1073,21 @@ function modelFinding(model) {
 	};
 }
 function runtimeFinding(runtime) {
-	if (runtime.status === "ok" || !runtime.eol) return null;
-	const label = `${RUNTIME_NAMES[runtime.name] ?? runtime.name} ${runtime.version}`;
-	const target = `${RUNTIME_NAMES[runtime.name] ?? runtime.name} ${runtime.moveTo}`;
-	const when = formatDate(runtime.eol);
+	if (runtime.status === "ok") return null;
 	const ended = runtime.status === "ended";
+	if (!ended && !runtime.eol) return null;
+	const engine = RUNTIME_NAMES[runtime.name] ?? runtime.name;
+	const label = `${engine} ${runtime.version}`;
+	const on = runtime.eol ? ` on ${formatDate(runtime.eol)}` : "";
+	const move = runtime.moveTo ? `Move it to ${engine} ${runtime.moveTo}. ` : `Move it to the current long-term version of ${engine}. `;
+	const current = runtime.moveTo ? ` The current long-term version is ${engine} ${runtime.moveTo}.` : "";
 	return {
 		id: `runtime:${runtime.name}`,
 		kind: "runtime",
 		urgency: ended ? "soon" : "later",
-		title: ended ? `${label} stopped getting security fixes on ${when}` : `${label} stops getting security fixes on ${when}`,
-		body: ended ? `This is the engine your app runs on. New security holes found in it are no longer repaired. The current long-term version is ${target}.` : `This is the engine your app runs on. After that date, new security holes found in it are no longer repaired. The current long-term version is ${target}.`,
-		prompt: `My app runs on ${label}, which ${ended ? "stopped" : "stops"} getting security fixes on ${when}. Move it to ${target}. First check which of my packages need updating for that. ${CHECK_AND_REPORT}`,
+		title: ended ? on ? `${label} stopped getting security fixes${on}` : `${label} no longer gets security fixes` : `${label} stops getting security fixes${on}`,
+		body: ended ? `This is the engine your app runs on. New security holes found in it are no longer repaired.${current}` : `This is the engine your app runs on. After that date, new security holes found in it are no longer repaired.${current}`,
+		prompt: `My app runs on ${label}, which ${ended ? on ? `stopped getting security fixes${on}` : "no longer gets security fixes" : `stops getting security fixes${on}`}. ${move}First check which of my packages need updating for that. ${CHECK_AND_REPORT}`,
 		links: []
 	};
 }
@@ -1118,7 +1141,15 @@ async function runCheck({ stack, extraModels = [], today, fetchJson, modelTable 
 			}))).filter((report) => report !== null);
 		}, [])
 	]);
-	const modelIds = [...new Set([...stack.models ?? [], ...extraModels].map((id) => String(id).trim()).filter(Boolean))];
+	const modelIds = [];
+	const seenModels = /* @__PURE__ */ new Set();
+	for (const id of [...stack.models ?? [], ...extraModels].map((raw) => String(raw).trim()).filter(Boolean)) {
+		const key = id.slice(id.lastIndexOf("/") + 1).toLowerCase();
+		if (!seenModels.has(key)) {
+			seenModels.add(key);
+			modelIds.push(id);
+		}
+	}
 	const { matches: models, unlisted: unlistedModels } = findModelRetirements(modelIds, modelTable, today);
 	const findings = buildFindings({
 		vulnerabilities,
@@ -1184,21 +1215,33 @@ function runtimeFrom(raw = {}) {
 	}
 	return runtime;
 }
+var isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 function fromCard(data) {
-	const packages = Object.entries(data.packages ?? {}).map(([name, version]) => ({
-		name,
-		version: String(version),
-		direct: true,
-		dev: false
-	}));
+	const packages = [];
+	const skipped = [];
+	for (const [name, version] of Object.entries(isObject(data.packages) ? data.packages : {})) {
+		const text = version === null || version === void 0 ? "" : String(version).trim();
+		if (text) packages.push({
+			name,
+			version: text,
+			direct: true,
+			dev: false
+		});
+		else skipped.push({
+			name,
+			reason: "no version given"
+		});
+	}
+	const python = /pypi|python/i.test(String(data.ecosystem ?? ""));
+	const models = Array.isArray(data.models) ? data.models : typeof data.models === "string" ? [data.models] : [];
 	return {
 		source: "card",
-		ecosystem: data.ecosystem === "PyPI" ? "PyPI" : "npm",
+		ecosystem: python ? "PyPI" : "npm",
 		exact: true,
 		packages,
-		skipped: [],
-		runtime: runtimeFrom(data.runtime),
-		models: Array.isArray(data.models) ? data.models.map(String) : []
+		skipped,
+		runtime: runtimeFrom(isObject(data.runtime) ? data.runtime : {}),
+		models: models.map((model) => String(model).trim()).filter(Boolean)
 	};
 }
 function fromPackageJson(data) {
@@ -1215,7 +1258,7 @@ function fromPackageJson(data) {
 			});
 			else skipped.push({
 				name,
-				reason: "not installed from the public registry"
+				reason: /[:/]/.test(String(spec)) ? "not installed from the public registry" : "no version given"
 			});
 		}
 	};
@@ -1247,11 +1290,22 @@ function fromLockfile(data) {
 			dev: Boolean(dev)
 		});
 	};
-	for (const [path, entry] of Object.entries(data.packages ?? {})) {
-		if (!path) continue;
-		add(path.slice(path.lastIndexOf("node_modules/") + 13), entry.version, entry.dev);
+	for (const [path, entry] of Object.entries(isObject(data.packages) ? data.packages : {})) {
+		const at = path.lastIndexOf("node_modules/");
+		if (at < 0 || !isObject(entry) || entry.link) continue;
+		add(path.slice(at + 13), entry.version, entry.dev);
 	}
-	if (!data.packages) for (const [name, entry] of Object.entries(data.dependencies ?? {})) add(name, entry.version, entry.dev);
+	if (!data.packages) {
+		const walk = (deps, depth) => {
+			if (!isObject(deps) || depth > 50) return;
+			for (const [name, entry] of Object.entries(deps)) {
+				if (!isObject(entry)) continue;
+				add(name, entry.version, entry.dev);
+				walk(entry.dependencies, depth + 1);
+			}
+		};
+		walk(data.dependencies, 0);
+	}
 	return {
 		source: "package-lock.json",
 		ecosystem: "npm",
@@ -1262,11 +1316,11 @@ function fromLockfile(data) {
 		models: []
 	};
 }
-var requirementLine = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(?:(==|>=|~=|<=|>|<|!=)\s*([^\s;,]+))?/;
+var requirementLine = /^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(?:(@)|(===|==|>=|~=|<=|>|<|!=)\s*([^\s;,]+))?/;
 function looksLikeRequirements(text) {
 	const lines = meaningfulLines(text);
 	if (!lines.length) return false;
-	const pinned = lines.filter((line) => /^[A-Za-z0-9][A-Za-z0-9._-]*\s*(\[[^\]]*\])?\s*(==|>=|~=)/.test(line));
+	const pinned = lines.filter((line) => /^[A-Za-z0-9][A-Za-z0-9._-]*\s*(\[[^\]]*\])?\s*(===|==|>=|~=|>\s*\d)/.test(line));
 	const bare = lines.filter((line) => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(line));
 	return pinned.length > 0 && pinned.length + bare.length >= lines.length / 2;
 }
@@ -1277,11 +1331,24 @@ function fromRequirements(text) {
 	const packages = [];
 	const skipped = [];
 	let exact = true;
+	const seen = /* @__PURE__ */ new Set();
 	for (const line of meaningfulLines(text)) {
 		const match = requirementLine.exec(line);
 		if (!match) continue;
-		const [, name, operator, version] = match;
-		if (!version) {
+		const [, name, url, operator, raw] = match;
+		const key = name.toLowerCase().replace(/[-_.]+/g, "-");
+		if (seen.has(key)) continue;
+		seen.add(key);
+		if (url) {
+			skipped.push({
+				name,
+				reason: "not installed from the public registry"
+			});
+			exact = false;
+			continue;
+		}
+		const version = raw?.replace(/(\.\*)+$/, "");
+		if (!version || !/\d/.test(version)) {
 			skipped.push({
 				name,
 				reason: "no version given"
@@ -1289,7 +1356,7 @@ function fromRequirements(text) {
 			exact = false;
 			continue;
 		}
-		if (operator !== "==") exact = false;
+		if (operator !== "==" && operator !== "===" || version !== raw) exact = false;
 		packages.push({
 			name,
 			version,
@@ -1566,6 +1633,12 @@ var MAX_FILE_BYTES = 4e5;
 var MAX_FILES = 4e3;
 var MAX_DEPTH = 8;
 var TOKEN = /[a-z0-9][a-z0-9.-]*/gi;
+function spellings(token) {
+	const out = [token];
+	const bedrock = /^(?:[a-z]{2}\.)?(?:anthropic|meta|amazon|cohere|mistral|ai21|deepseek|openai)\.(.+?)(?:-v\d+)?$/.exec(token);
+	if (bedrock) out.push(bedrock[1]);
+	return out;
+}
 function findModels(directory, knownIds) {
 	const known = new Map(knownIds.map((id) => [id.toLowerCase(), id]));
 	const found = /* @__PURE__ */ new Set();
@@ -1598,8 +1671,8 @@ function findModels(directory, knownIds) {
 			} catch {
 				continue;
 			}
-			for (const token of text.match(TOKEN) ?? []) {
-				const id = known.get(token.replace(/[.-]+$/, "").toLowerCase());
+			for (const token of text.match(TOKEN) ?? []) for (const candidate of spellings(token.replace(/[.-]+$/, "").toLowerCase())) {
+				const id = known.get(candidate);
 				if (id) found.add(id);
 			}
 		}
@@ -1677,9 +1750,9 @@ async function run({ argv, cwd, fetchJson, today = todayIso(), bundledTable = mo
 	const [project, table] = [readProject(folder), await freshTable(fetchJson, bundledTable)];
 	const named = findModels(folder, table.models.models.map((model) => model.id));
 	const models = [.../* @__PURE__ */ new Set([...named, ...options.models])];
-	if (!project.stacks.length && !models.length) return {
+	if (!project.stacks.some((entry) => entry.stack.packages.length > 0 || Object.keys(entry.stack.runtime).length > 0) && !models.length) return {
 		code: 2,
-		out: `Tend found nothing to check in ${folder}.\nNo package-lock.json, package.json or requirements.txt is there, and the code names no AI model on the retirement lists.\nRun it in the folder that holds one of those files, or name the folder: npx -y github:sree-data/tend path/to/app`
+		out: `Tend found nothing to check in ${folder}.\nNo package-lock.json, package.json or requirements.txt there lists anything to check, and the code names no AI model on the retirement lists.\nRun it in the folder that holds one of those files, or name the folder: npx -y github:sree-data/tend path/to/app`
 	};
 	const stacks = project.stacks.length ? project.stacks.map((entry) => entry.stack) : [{
 		source: "empty",
@@ -1722,7 +1795,7 @@ async function freshTable(fetchJson, bundled) {
 			timer = setTimeout(() => reject(/* @__PURE__ */ new Error("slow")), TABLE_WAIT_MS);
 		});
 		const table = await Promise.race([fetchJson(TABLE_URL), waited]);
-		if (Array.isArray(table?.models) && table.models.length > 0 && table.models.every((model) => model?.id && model?.retires)) return {
+		if (Array.isArray(table?.models) && table.models.length > 0 && table.models.every((model) => typeof model?.id === "string" && model.id && /^\d{4}-\d{2}-\d{2}$/.test(String(model?.retires)))) return {
 			models: table,
 			builtIn: false
 		};
