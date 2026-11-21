@@ -52,7 +52,7 @@ jobs:
             const r = JSON.parse(require('fs').readFileSync('out.json', 'utf8'));
             const ids = r.findings.map((f) => f.id);
             console.log(ids, r.summary, r.missed);
-            if (!ids.includes('security:lodash')) throw new Error('lodash not flagged');
+            if (!ids.some((i) => i.startsWith('security:lodash@'))) throw new Error('lodash not flagged');
             if (!ids.includes('runtime:node')) throw new Error('Node 18 not flagged');
             if (r.missed.length) throw new Error('a lookup was missed: ' + r.missed);
             if (r.modelTableIsBuiltIn) throw new Error('the published model table was not fetched');
