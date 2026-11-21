@@ -1,5 +1,3 @@
 wrangler.jsonc
 .assetsignore
-CNAME
-.nojekyll
 .git
